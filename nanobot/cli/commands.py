@@ -2,24 +2,24 @@
 
 import asyncio
 import os
-import signal
-from pathlib import Path
 import select
+import signal
 import sys
+from pathlib import Path
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.patch_stdout import patch_stdout
-
-from nanobot import __version__, __logo__
+from nanobot import __logo__, __version__
 from nanobot.config.schema import Config
+from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
     name="nanobot",
@@ -185,8 +185,6 @@ def onboard():
         workspace.mkdir(parents=True, exist_ok=True)
         console.print(f"[green]✓[/green] Created workspace at {workspace}")
 
-    # Create default bootstrap files
-    _create_workspace_templates(workspace)
 
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
@@ -198,42 +196,12 @@ def onboard():
 
 
 
-def _create_workspace_templates(workspace: Path):
-    """Create default workspace template files from bundled templates."""
-    from importlib.resources import files as pkg_files
-
-    templates_dir = pkg_files("nanobot") / "templates"
-
-    for item in templates_dir.iterdir():
-        if not item.name.endswith(".md"):
-            continue
-        dest = workspace / item.name
-        if not dest.exists():
-            dest.write_text(item.read_text(encoding="utf-8"), encoding="utf-8")
-            console.print(f"  [dim]Created {item.name}[/dim]")
-
-    memory_dir = workspace / "memory"
-    memory_dir.mkdir(exist_ok=True)
-
-    memory_template = templates_dir / "memory" / "MEMORY.md"
-    memory_file = memory_dir / "MEMORY.md"
-    if not memory_file.exists():
-        memory_file.write_text(memory_template.read_text(encoding="utf-8"), encoding="utf-8")
-        console.print("  [dim]Created memory/MEMORY.md[/dim]")
-
-    history_file = memory_dir / "HISTORY.md"
-    if not history_file.exists():
-        history_file.write_text("", encoding="utf-8")
-        console.print("  [dim]Created memory/HISTORY.md[/dim]")
-
-    (workspace / "skills").mkdir(exist_ok=True)
-
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
+    from nanobot.providers.custom_provider import CustomProvider
     from nanobot.providers.litellm_provider import LiteLLMProvider
     from nanobot.providers.openai_codex_provider import OpenAICodexProvider
-    from nanobot.providers.custom_provider import CustomProvider
 
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
@@ -279,11 +247,10 @@ def gateway(
     config: Path | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Start the nanobot gateway."""
-    from nanobot.config.loader import load_config, get_data_dir
-    from nanobot.bus.queue import MessageBus
     from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
-    from nanobot.session.manager import SessionManager
+    from nanobot.config.loader import get_data_dir, load_config
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
@@ -294,7 +261,6 @@ def gateway(
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
 
-    config = load_config(config)
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
@@ -314,7 +280,9 @@ def gateway(
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
         memory_window=config.agents.defaults.memory_window,
+        reasoning_effort=config.agents.defaults.reasoning_effort,
         brave_api_key=config.tools.web.search.api_key or None,
+        web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -326,18 +294,30 @@ def gateway(
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
+        from nanobot.agent.tools.message import MessageTool
+        reminder_note = (
+            "[Scheduled Task] Timer finished.\n\n"
+            f"Task '{job.name}' has been triggered.\n"
+            f"Scheduled instruction: {job.payload.message}"
+        )
+
         response = await agent.process_direct(
-            job.payload.message,
+            reminder_note,
             session_key=f"cron:{job.id}",
             channel=job.payload.channel or "cli",
             chat_id=job.payload.to or "direct",
         )
-        if job.payload.deliver and job.payload.to:
+
+        message_tool = agent.tools.get("message")
+        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+            return response
+
+        if job.payload.deliver and job.payload.to and response:
             from nanobot.bus.events import OutboundMessage
             await bus.publish_outbound(OutboundMessage(
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to,
-                content=response or ""
+                content=response
             ))
         return response
     cron.on_job = on_cron_job
@@ -442,13 +422,8 @@ def agent(
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
 ):
     """Interact with the agent directly."""
-    from nanobot.config.loader import load_config, get_data_dir
-    from nanobot.bus.queue import MessageBus
-    from nanobot.agent.loop import AgentLoop
-    from nanobot.cron.service import CronService
     from loguru import logger
 
-    config = load_config()
 
     bus = MessageBus()
     provider = _make_provider(config)
@@ -471,7 +446,9 @@ def agent(
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
         memory_window=config.agents.defaults.memory_window,
+        reasoning_effort=config.agents.defaults.reasoning_effort,
         brave_api_key=config.tools.web.search.api_key or None,
+        web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -765,6 +742,7 @@ def _get_bridge_dir() -> Path:
 def channels_login():
     """Link device via QR code."""
     import subprocess
+
     from nanobot.config.loader import load_config
 
     config = load_config()
@@ -943,11 +921,12 @@ def cron_run(
 ):
     """Manually run a job."""
     from loguru import logger
-    from nanobot.config.loader import load_config, get_data_dir
+
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
+    from nanobot.config.loader import get_data_dir, load_config
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
-    from nanobot.bus.queue import MessageBus
-    from nanobot.agent.loop import AgentLoop
     logger.disable("nanobot")
 
     config = load_config()
@@ -962,7 +941,9 @@ def cron_run(
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
         memory_window=config.agents.defaults.memory_window,
+        reasoning_effort=config.agents.defaults.reasoning_effort,
         brave_api_key=config.tools.web.search.api_key or None,
+        web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         mcp_servers=config.tools.mcp_servers,
@@ -1005,7 +986,7 @@ def cron_run(
 @app.command()
 def status():
     """Show nanobot status."""
-    from nanobot.config.loader import load_config, get_config_path
+    from nanobot.config.loader import get_config_path, load_config
 
     config_path = get_config_path()
     config = load_config()
