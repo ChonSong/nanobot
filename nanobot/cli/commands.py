@@ -159,9 +159,9 @@ def onboard():
     from nanobot.config.loader import get_config_path, load_config, save_config
     from nanobot.config.schema import Config
     from nanobot.utils.helpers import get_workspace_path
-    
+
     config_path = get_config_path()
-    
+
     if config_path.exists():
         console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
         console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
@@ -177,17 +177,17 @@ def onboard():
     else:
         save_config(Config())
         console.print(f"[green]✓[/green] Created config at {config_path}")
-    
+
     # Create workspace
     workspace = get_workspace_path()
-    
+
     if not workspace.exists():
         workspace.mkdir(parents=True, exist_ok=True)
         console.print(f"[green]✓[/green] Created workspace at {workspace}")
-    
+
     # Create default bootstrap files
     _create_workspace_templates(workspace)
-    
+
     console.print(f"\n{__logo__} nanobot is ready!")
     console.print("\nNext steps:")
     console.print("  1. Add your API key to [cyan]~/.nanobot/config.json[/cyan]")
@@ -276,6 +276,7 @@ def _make_provider(config: Config):
 def gateway(
     port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    config: Path | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Start the nanobot gateway."""
     from nanobot.config.loader import load_config, get_data_dir
@@ -286,28 +287,29 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
-    
+
     if verbose:
         import logging
         logging.basicConfig(level=logging.DEBUG)
-    
+
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
-    
-    config = load_config()
+
+    config = load_config(config)
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
-    
+
     # Create cron service first (callback set after agent creation)
     cron_store_path = get_data_dir() / "cron" / "jobs.json"
     cron = CronService(cron_store_path)
-    
+
     # Create agent with cron service
     agent = AgentLoop(
         bus=bus,
         provider=provider,
         workspace=config.workspace_path,
         model=config.agents.defaults.model,
+        vision_model=config.agents.defaults.vision_model or None,
         temperature=config.agents.defaults.temperature,
         max_tokens=config.agents.defaults.max_tokens,
         max_iterations=config.agents.defaults.max_tool_iterations,
@@ -320,7 +322,7 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
-    
+
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
@@ -339,7 +341,7 @@ def gateway(
             ))
         return response
     cron.on_job = on_cron_job
-    
+
     # Create channel manager
     channels = ChannelManager(config, bus)
 
@@ -393,18 +395,18 @@ def gateway(
         interval_s=hb_cfg.interval_s,
         enabled=hb_cfg.enabled,
     )
-    
+
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
-    
+
     cron_status = cron.status()
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
-    
+
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
-    
+
     async def run():
         try:
             await cron.start()
@@ -421,7 +423,7 @@ def gateway(
             cron.stop()
             agent.stop()
             await channels.stop_all()
-    
+
     asyncio.run(run())
 
 
@@ -445,9 +447,9 @@ def agent(
     from nanobot.agent.loop import AgentLoop
     from nanobot.cron.service import CronService
     from loguru import logger
-    
+
     config = load_config()
-    
+
     bus = MessageBus()
     provider = _make_provider(config)
 
@@ -459,7 +461,7 @@ def agent(
         logger.enable("nanobot")
     else:
         logger.disable("nanobot")
-    
+
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -476,7 +478,7 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
     )
-    
+
     # Show spinner when logs are off (no output to miss); skip when logs are on
     def _thinking_ctx():
         if logs:
@@ -652,7 +654,7 @@ def channels_status():
         "✓" if mc.enabled else "✗",
         mc_base
     )
-    
+
     # Telegram
     tg = config.channels.telegram
     tg_config = f"token: {tg.token[:10]}..." if tg.token else "[dim]not configured[/dim]"
@@ -705,57 +707,57 @@ def _get_bridge_dir() -> Path:
     """Get the bridge directory, setting it up if needed."""
     import shutil
     import subprocess
-    
+
     # User's bridge location
     user_bridge = Path.home() / ".nanobot" / "bridge"
-    
+
     # Check if already built
     if (user_bridge / "dist" / "index.js").exists():
         return user_bridge
-    
+
     # Check for npm
     if not shutil.which("npm"):
         console.print("[red]npm not found. Please install Node.js >= 18.[/red]")
         raise typer.Exit(1)
-    
+
     # Find source bridge: first check package data, then source dir
     pkg_bridge = Path(__file__).parent.parent / "bridge"  # nanobot/bridge (installed)
     src_bridge = Path(__file__).parent.parent.parent / "bridge"  # repo root/bridge (dev)
-    
+
     source = None
     if (pkg_bridge / "package.json").exists():
         source = pkg_bridge
     elif (src_bridge / "package.json").exists():
         source = src_bridge
-    
+
     if not source:
         console.print("[red]Bridge source not found.[/red]")
         console.print("Try reinstalling: pip install --force-reinstall nanobot")
         raise typer.Exit(1)
-    
+
     console.print(f"{__logo__} Setting up bridge...")
-    
+
     # Copy to user directory
     user_bridge.parent.mkdir(parents=True, exist_ok=True)
     if user_bridge.exists():
         shutil.rmtree(user_bridge)
     shutil.copytree(source, user_bridge, ignore=shutil.ignore_patterns("node_modules", "dist"))
-    
+
     # Install and build
     try:
         console.print("  Installing dependencies...")
         subprocess.run(["npm", "install"], cwd=user_bridge, check=True, capture_output=True)
-        
+
         console.print("  Building...")
         subprocess.run(["npm", "run", "build"], cwd=user_bridge, check=True, capture_output=True)
-        
+
         console.print("[green]✓[/green] Bridge ready\n")
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Build failed: {e}[/red]")
         if e.stderr:
             console.print(f"[dim]{e.stderr.decode()[:500]}[/dim]")
         raise typer.Exit(1)
-    
+
     return user_bridge
 
 
@@ -764,17 +766,17 @@ def channels_login():
     """Link device via QR code."""
     import subprocess
     from nanobot.config.loader import load_config
-    
+
     config = load_config()
     bridge_dir = _get_bridge_dir()
-    
+
     console.print(f"{__logo__} Starting bridge...")
     console.print("Scan the QR code to connect.\n")
-    
+
     env = {**os.environ}
     if config.channels.whatsapp.bridge_token:
         env["BRIDGE_TOKEN"] = config.channels.whatsapp.bridge_token
-    
+
     try:
         subprocess.run(["npm", "start"], cwd=bridge_dir, check=True, env=env)
     except subprocess.CalledProcessError as e:
@@ -798,23 +800,23 @@ def cron_list(
     """List scheduled jobs."""
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     jobs = service.list_jobs(include_disabled=all)
-    
+
     if not jobs:
         console.print("No scheduled jobs.")
         return
-    
+
     table = Table(title="Scheduled Jobs")
     table.add_column("ID", style="cyan")
     table.add_column("Name")
     table.add_column("Schedule")
     table.add_column("Status")
     table.add_column("Next Run")
-    
+
     import time
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
@@ -826,7 +828,7 @@ def cron_list(
             sched = f"{job.schedule.expr or ''} ({job.schedule.tz})" if job.schedule.tz else (job.schedule.expr or "")
         else:
             sched = "one-time"
-        
+
         # Format next run
         next_run = ""
         if job.state.next_run_at_ms:
@@ -836,11 +838,11 @@ def cron_list(
                 next_run = _dt.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M")
             except Exception:
                 next_run = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-        
+
         status = "[green]enabled[/green]" if job.enabled else "[dim]disabled[/dim]"
-        
+
         table.add_row(job.id, job.name, sched, status, next_run)
-    
+
     console.print(table)
 
 
@@ -860,7 +862,7 @@ def cron_add(
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronSchedule
-    
+
     if tz and not cron_expr:
         console.print("[red]Error: --tz can only be used with --cron[/red]")
         raise typer.Exit(1)
@@ -877,10 +879,10 @@ def cron_add(
     else:
         console.print("[red]Error: Must specify --every, --cron, or --at[/red]")
         raise typer.Exit(1)
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     try:
         job = service.add_job(
             name=name,
@@ -904,10 +906,10 @@ def cron_remove(
     """Remove a scheduled job."""
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     if service.remove_job(job_id):
         console.print(f"[green]✓[/green] Removed job {job_id}")
     else:
@@ -922,10 +924,10 @@ def cron_enable(
     """Enable or disable a job."""
     from nanobot.config.loader import get_data_dir
     from nanobot.cron.service import CronService
-    
+
     store_path = get_data_dir() / "cron" / "jobs.json"
     service = CronService(store_path)
-    
+
     job = service.enable_job(job_id, enabled=not disable)
     if job:
         status = "disabled" if disable else "enabled"
@@ -1018,7 +1020,7 @@ def status():
         from nanobot.providers.registry import PROVIDERS
 
         console.print(f"Model: {config.agents.defaults.model}")
-        
+
         # Check API keys from registry
         for spec in PROVIDERS:
             p = getattr(config.providers, spec.name, None)

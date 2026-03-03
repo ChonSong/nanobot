@@ -206,6 +206,7 @@ class AgentDefaults(Base):
 
     workspace: str = "~/.nanobot/workspace"
     model: str = "anthropic/claude-opus-4-5"
+    vision_model: str = ""  # Vision-capable model for image input (e.g., "qwen/qwen3.5-flash-02-23")
     provider: str = "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection
     max_tokens: int = 8192
     temperature: float = 0.1
