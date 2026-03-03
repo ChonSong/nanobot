@@ -22,6 +22,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.spawn import SpawnTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
+from nanobot.agent.tools.coach_player import CoachPlayerTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
@@ -52,6 +53,7 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
+        vision_model: str | None = None,
         max_iterations: int = 40,
         temperature: float = 0.1,
         max_tokens: int = 4096,
@@ -72,6 +74,7 @@ class AgentLoop:
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
+        self.vision_model = vision_model  # Vision-capable model for image input
         self.max_iterations = max_iterations
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -129,6 +132,9 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        
+        # Coach-Player for verified task execution
+        self.tools.register(CoachPlayerTool(agent_loop=self))
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -177,6 +183,16 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    def _has_images(self, messages: list[dict]) -> bool:
+        """Check if any message contains image content (base64 encoded)."""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "image_url":
+                        return True
+        return False
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
@@ -188,13 +204,19 @@ class AgentLoop:
         final_content = None
         tools_used: list[str] = []
 
+        # Determine which model to use: vision model if images present and configured
+        use_model = self.model
+        if self.vision_model and self._has_images(initial_messages):
+            logger.info("Using vision model {} for image input", self.vision_model)
+            use_model = self.vision_model
+
         while iteration < self.max_iterations:
             iteration += 1
 
             response = await self.provider.chat(
                 messages=messages,
                 tools=self.tools.get_definitions(),
-                model=self.model,
+                model=use_model,
                 temperature=self.temperature,
                 max_tokens=self.max_tokens,
                 reasoning_effort=self.reasoning_effort,

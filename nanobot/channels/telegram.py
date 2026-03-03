@@ -114,6 +114,7 @@ class TelegramChannel(BaseChannel):
         BotCommand("new", "Start a new conversation"),
         BotCommand("stop", "Stop the current task"),
         BotCommand("help", "Show available commands"),
+        BotCommand("goodmorning", "Get your daily briefing"),
     ]
 
     def __init__(
@@ -151,7 +152,6 @@ class TelegramChannel(BaseChannel):
         self._app.add_handler(CommandHandler("start", self._on_start))
         self._app.add_handler(CommandHandler("new", self._forward_command))
         self._app.add_handler(CommandHandler("help", self._on_help))
-
         # Add message handler for text, photos, voice, documents
         self._app.add_handler(
             MessageHandler(
@@ -309,7 +309,34 @@ class TelegramChannel(BaseChannel):
             "🐈 nanobot commands:\n"
             "/new — Start a new conversation\n"
             "/stop — Stop the current task\n"
-            "/help — Show available commands"
+            "/help — Show available commands\n"
+            "/goodmorning — Get your daily briefing"
+        )
+
+    async def _on_goodmorning(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle /goodmorning command to trigger morning briefing."""
+        if not update.message or not update.effective_user:
+            return
+
+        user = update.effective_user
+        chat_id = str(update.message.chat_id)
+        sender_id = self._sender_id(user)
+        
+        # Store chat_id for replies
+        self._chat_ids[sender_id] = update.message.chat_id
+        
+        await update.message.reply_text(
+            f"☀️ Good morning {user.first_name}! Fetching your briefing..."
+        )
+        
+        # Start typing indicator
+        self._start_typing(chat_id)
+        
+        # Forward to the message bus with a prompt to trigger morning briefing
+        await self._handle_message(
+            sender_id=sender_id,
+            chat_id=chat_id,
+            content="/goodmorning",
         )
 
     @staticmethod
