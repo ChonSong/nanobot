@@ -19,6 +19,7 @@ from rich.text import Text
 
 from nanobot import __logo__, __version__
 from nanobot.config.schema import Config
+from nanobot.session.manager import SessionManager
 from nanobot.utils.helpers import sync_workspace_templates
 
 app = typer.Typer(
@@ -245,6 +246,7 @@ def gateway(
     port: int = typer.Option(18790, "--port", "-p", help="Gateway port"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
     config: Path | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+    dev: bool = typer.Option(False, "--dev", "-d", help="Use dev config (~/.nanobot/dev/config.json)"),
 ):
     """Start the nanobot gateway."""
     from nanobot.agent.loop import AgentLoop
@@ -260,6 +262,12 @@ def gateway(
         logging.basicConfig(level=logging.DEBUG)
 
     console.print(f"{__logo__} Starting nanobot gateway on port {port}...")
+
+    if dev:
+        config = Path.home() / ".nanobot" / "dev" / "config.json"
+        console.print(f"  [yellow]Using dev config: {config}[/yellow]")
+
+    config = load_config(config)
 
     bus = MessageBus()
     provider = _make_provider(config)
@@ -416,15 +424,25 @@ def gateway(
 
 @app.command()
 def agent(
+    config: Path | None = typer.Option(None, "--config", "-c", help="Path to config file"),
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
     session_id: str = typer.Option("cli:direct", "--session", "-s", help="Session ID"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
     logs: bool = typer.Option(False, "--logs/--no-logs", help="Show nanobot runtime logs during chat"),
+    dev: bool = typer.Option(False, "--dev", "-d", help="Use dev config (~/.nanobot/dev/config.json)"),
 ):
     """Interact with the agent directly."""
     from loguru import logger
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.queue import MessageBus
+    from nanobot.config.loader import load_config, get_data_dir
+    from nanobot.cron.service import CronService
 
+    if dev:
+        config = Path.home() / ".nanobot" / "dev" / "config.json"
+        console.print(f"[yellow]Using dev config: {config}[/yellow]")
 
+    config = load_config(config)
     bus = MessageBus()
     provider = _make_provider(config)
 
